@@ -1,2 +1,2 @@
 # tada
-Todo list manager
+My cool todo list manager

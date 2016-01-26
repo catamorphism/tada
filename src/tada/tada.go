@@ -19,8 +19,8 @@ func init() {
 }
 
 type TodoItem struct {
-	description string    // Description of this task
-	dueDate     time.Time // Task due date
+	Description string    // Description of this task
+	DueDate     time.Time // Task due date
 }
 
 type TodoID datastore.Key // database key / unique ID for a todo item
@@ -36,21 +36,28 @@ func (t_item TodoItem) isMaybeError() {}
 func (t_id TodoID) isMaybeError()     {}
 
 // testing only
-var defaultTask = TodoItem{description: "test item", dueDate: time.Now()}
+var defaultTask = TodoItem{Description: "test item", DueDate: time.Now()}
+
+func log(s string) {
+	fmt.Printf("%s\n", s)
+	// return
+}
 
 // TODO: would really be better to statically require that Write returns an item and Read returns an ID
 
 // Takes a task description and a due date, returns a todo item ID
 func writeTodoItem(ctx context.Context, description string, dueDate time.Time) *MaybeError {
 	item := TodoItem{
-		description: description,
-		dueDate:     dueDate,
+		Description: description,
+		DueDate:     dueDate,
 	}
 	key, err := datastore.Put(ctx, datastore.NewIncompleteKey(ctx, "TodoItem", nil), &item)
 	var result = new(MaybeError)
 	if err != nil {
+		log("write error: " + err.Error())
 		*result = E(err.Error())
 	} else {
+		log("write succeeded " + key.String())
 		*result = TodoID(*key)
 	}
 	return result
@@ -58,14 +65,17 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time) *
 
 // Takes a todo item ID, returns a todo item
 func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
-	var item *TodoItem
+	item := new(TodoItem)
 	var err error
 	var result = new(MaybeError)
 	var key = new(datastore.Key)
 	*key = datastore.Key(itemID)
-	if err = datastore.Get(ctx, key, &item); err != nil {
+	log("calling Get on: " + (*key).String())
+	if err = datastore.Get(ctx, key, item); err != nil {
+		log("read failed: " + err.Error())
 		*result = E(err.Error())
 	} else {
+		log("read succeeded with " + item.Description)
 		*result = *item
 	}
 	return (result)
@@ -122,6 +132,6 @@ func respondWith(w http.ResponseWriter, result MaybeError) {
 	case TodoItem:
 		// show the looked-up item
 		item := result.(TodoItem)
-		fmt.Fprintf(w, "item: %s due %d", item.description, item.dueDate)
+		fmt.Fprintf(w, "item: %s due %d", item.Description, item.DueDate)
 	}
 }

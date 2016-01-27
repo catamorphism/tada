@@ -1,6 +1,7 @@
 package tada
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 
 func assert(t *testing.T, v bool, error string) {
 	if !v {
-		t.Errorf("Assertion failed: ", error)
+		t.Errorf("Assertion failed: %s", error)
 	}
 }
 
@@ -34,7 +35,7 @@ func TestKeyComplete(t *testing.T) {
 		k2 := datastore.Key(k1)
 		assert(t, !k2.Incomplete(), "write returned an incomplete key")
 	case E, TodoItem:
-		t.Fatal("Expected write to return a todo ID, got something else")
+		t.Fatal(fmt.Sprintf("Expected write to return a todo ID, got something else: %s", *k))
 	}
 
 	defer done()
@@ -65,4 +66,29 @@ func TestReadAfterWrite(t *testing.T) {
 
 	defer done()
 
+}
+
+func TestTextSearch(t *testing.T) {
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
+
+	writeTodoItem(ctx, "phone up my friend", dueDate)
+	writeTodoItem(ctx, "buy a new phone", dueDate)
+	writeTodoItem(ctx, "feed the fish", dueDate)
+	queryResults := searchTodoItems(ctx, "phone")
+	switch (*queryResults).(type) {
+	case Matches:
+		items := ([]TodoItem)((*queryResults).(Matches))
+		assert(t, len(items) == 2, "wrong number of search results")
+		// I don't know if the order is deterministic, but *shrug*
+		assert(t, items[0].Description == "buy a new phone", "wrong first task")
+		assert(t, items[1].Description == "phone up my friend", "wrong second task")
+	case E, TodoID, TodoItem:
+		t.Fatal("Didn't get a Matches result from a search")
+	}
+
+	defer done()
 }

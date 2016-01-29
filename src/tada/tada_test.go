@@ -92,3 +92,5 @@ func TestTextSearch(t *testing.T) {
 
 	defer done()
 }
+
+// TODO: test for listTodoItems()

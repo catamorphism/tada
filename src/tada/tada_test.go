@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/appengine/aetest"
 	"google.golang.org/appengine/datastore"
+	"google.golang.org/appengine/taskqueue"
 )
 
 func assert(t *testing.T, v bool, error string) {
@@ -145,6 +146,29 @@ func TestUpdate(t *testing.T) {
 		case E, TodoID, Matches:
 			t.Fatal("Didn't get a TodoItem result from readTodoItem")
 		}
+	case E, TodoItem, Matches:
+		t.Fatal("Didn't get a TodoID result from writeTodoItem")
+	}
+	defer done()
+}
+
+// actually want to do auth first
+func TestEmailReminder(t *testing.T) {
+	// Add a new todo item. Check that there's an item in the pull queue
+	// with the correct due date.
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
+	id := writeTodoItem(ctx, "water my cactus", dueDate, false)
+	switch (*id).(type) {
+	case TodoID:
+		// ((datastore.Key)((*id).(TodoID)))
+		tasks, err := taskqueue.Lease(ctx, 1, "reminders", 3600)
+		assert(t, err == nil, "error pulling tasks from queue")
+		assert(t, len(tasks) == 1, "wrong number of tasks in queue")
 	case E, TodoItem, Matches:
 		t.Fatal("Didn't get a TodoID result from writeTodoItem")
 	}

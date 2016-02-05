@@ -1,0 +1,6 @@
+queue:
+- name: reminders
+  mode: pull
+  acl:
+  - user_email: catamorphism@gmail.com      # can list, get, lease, delete, and update tasks
+  - writer_email: catamorphism@gmail.com # can insert tasks

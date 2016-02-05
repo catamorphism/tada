@@ -2,6 +2,8 @@
 package tada
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"google.golang.org/appengine"
 	"google.golang.org/appengine/datastore"
 	"google.golang.org/appengine/search"
+	"google.golang.org/appengine/taskqueue"
 )
 
 func init() {
@@ -45,6 +48,7 @@ type Match struct {
 }
 type Matches []Match
 type SearchResults []TodoItem
+type Blob []byte
 
 func (err E) isMaybeError()              {}
 func (ok Ok) isMaybeError()              {}
@@ -52,6 +56,7 @@ func (t_item TodoItem) isMaybeError()    {}
 func (t_id TodoID) isMaybeError()        {}
 func (t_id Matches) isMaybeError()       {}
 func (t_id SearchResults) isMaybeError() {}
+func (t_id Blob) isMaybeError()          {}
 
 func log(s string) {
 	fmt.Printf("%s\n", s)
@@ -83,11 +88,22 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 		indexResult := indexCommentForSearch(ctx, k)
 		switch (*indexResult).(type) {
 		case E:
-			result = indexResult
+			return indexResult
 		case Ok:
 			break
 		case TodoID, Matches, TodoItem:
 			*result = E("weird answer from indexCommentForSearch")
+		}
+		if !state {
+			queueResult := addReminder(ctx, item)
+			switch (*queueResult).(type) {
+			case E:
+				return queueResult
+			case Ok:
+				break
+			case TodoID, Matches, TodoItem:
+				*result = E("weird answer from addReminder")
+			}
 		}
 	}
 	return result
@@ -257,6 +273,42 @@ func searchTodoItems(ctx context.Context, query string) *MaybeError {
 		*result = SearchResults(a)
 	}
 	return result
+}
+
+// Adds a reminder with the given text and due date to the pull queue.
+// A reminder will be sent half an hour before the due date
+func addReminder(ctx context.Context, item TodoItem) *MaybeError {
+	maybeBlob := itemToJson(item)
+	switch (*maybeBlob).(type) {
+	case Blob:
+		{
+			item1 := ([]bytes)(maybeBlob.(Blob))
+			t := &taskqueue.Task{
+				Payload: []byte(itemToJson(item1)),
+				Method:  "PULL",
+			}
+			_, err := taskqueue.Add(ctx, t, "reminders")
+			handleError(err)
+		}
+	case E:
+		{
+			return maybeBlob
+		}
+	case TodoItem, Matches, TodoID:
+		{
+			return &E("strange result from JSON encoder")
+		}
+	}
+}
+
+func itemToJson(item TodoItem) MaybeError {
+	b := new(bytes.Buffer)
+	e := json.NewEncoder(b)
+	err := e.encode(item)
+	if err != nil {
+		return &E("error trying to encode item")
+	}
+	return b
 }
 
 // Returns true if err != nil

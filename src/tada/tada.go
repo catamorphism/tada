@@ -19,6 +19,7 @@ func init() {
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/getTodo", getTodoHandler)
 	http.HandleFunc("/putTodo", putTodoHandler)
+	http.HandleFunc("/updateTask", updateTaskHandler)
 }
 
 type TodoItem struct {
@@ -35,13 +36,22 @@ type MaybeError interface {
 
 type E string
 type Ok struct{}
-type Matches []TodoItem
 
-func (err E) isMaybeError()           {}
-func (ok Ok) isMaybeError()           {}
-func (t_item TodoItem) isMaybeError() {}
-func (t_id TodoID) isMaybeError()     {}
-func (t_id Matches) isMaybeError()    {}
+// Used for returning stuff from listTodoItems.
+// Keep the keys and values separate so as not to add a Key field to the item struct
+type Match struct {
+	Key   *datastore.Key
+	Value TodoItem
+}
+type Matches []Match
+type SearchResults []TodoItem
+
+func (err E) isMaybeError()              {}
+func (ok Ok) isMaybeError()              {}
+func (t_item TodoItem) isMaybeError()    {}
+func (t_id TodoID) isMaybeError()        {}
+func (t_id Matches) isMaybeError()       {}
+func (t_id SearchResults) isMaybeError() {}
 
 func log(s string) {
 	fmt.Printf("%s\n", s)
@@ -71,6 +81,42 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 		k := TodoID(*key)
 		*result = k
 		indexResult := indexCommentForSearch(ctx, k)
+		switch (*indexResult).(type) {
+		case E:
+			result = indexResult
+		case Ok:
+			break
+		case TodoID, Matches, TodoItem:
+			*result = E("weird answer from indexCommentForSearch")
+		}
+	}
+	return result
+}
+
+// Takes a task description and a due date, along with an id, returns OK or an error
+func updateTodoItem(ctx context.Context, description string, dueDate time.Time, state bool, id int64) *MaybeError {
+	var taskState = "incomplete"
+	if state {
+		taskState = "completed"
+	}
+	item := TodoItem{
+		Description: description,
+		DueDate:     dueDate,
+		State:       taskState,
+	}
+	k := datastore.NewKey(ctx,
+		"TodoItem",
+		"",
+		id,
+		nil)
+	key, err := datastore.Put(ctx, k, &item)
+	var result = new(MaybeError)
+	if err != nil {
+		log("update error: " + err.Error())
+		*result = E(err.Error())
+	} else {
+		log("update succeeded " + key.String())
+		indexResult := indexCommentForSearch(ctx, TodoID(*key))
 		switch (*indexResult).(type) {
 		case E:
 			result = indexResult
@@ -130,17 +176,22 @@ func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
 }
 
 // Returns an array of all todo items
-func listTodoItems(ctx context.Context, w http.ResponseWriter) *MaybeError {
+func listTodoItems(ctx context.Context) *MaybeError {
 	var result = new(MaybeError)
 	var resultList = make([]TodoItem, 0)
 	q := datastore.NewQuery("TodoItem").Order("DueDate")
-	_, err := q.GetAll(ctx, &resultList)
+	keys, err := q.GetAll(ctx, &resultList)
 	if err != nil {
 		//		fmt.Fprintf(w, "listTodoItems got %d keys err = %s", len(keys), err.Error())
 		*result = E(err.Error())
 	} else {
 		//		fmt.Fprintf(w, "got %d items\n", len(keys))
-		*result = Matches(resultList) // lookupTodoItems(ctx, keys)
+		// *assuming* these are going to be in the same order...
+		var matches = make([]Match, 0)
+		for i, k := range keys {
+			matches = append(matches, Match{k, resultList[i]})
+		}
+		*result = Matches(matches)
 	}
 	return result
 }
@@ -167,25 +218,10 @@ func updateTaskState(ctx context.Context, itemID TodoID, completed bool) *MaybeE
 	return result
 }
 
-// Given a list of keys, look up each item
-func lookupTodoItems(ctx context.Context, keys []*datastore.Key) *MaybeError {
-	var result = new(MaybeError)
-	var err error
-	var resultList = make([]TodoItem, 0)
-	for _, key := range keys {
-		var item = new(TodoItem)
-		if err = datastore.Get(ctx, key, item); err != nil {
-			*result = E(err.Error())
-			return result
-		}
-		resultList = append(resultList, *item)
-	}
-	*result = Matches(resultList)
-	return result
-}
-
 // Searches for the string s in *comments* (not short descriptions, for the time being,)
-// returns an array of all matching todo item IDs
+// returns an array of all matching todo items
+// note: it would probably be more useful to be able to go to the actual todo item
+// so you can edit it, but ignoring that for now
 func searchTodoItems(ctx context.Context, query string) *MaybeError {
 	var result = new(MaybeError)
 	index, err := search.Open("tada")
@@ -218,7 +254,7 @@ func searchTodoItems(ctx context.Context, query string) *MaybeError {
 		}
 		a := make([]TodoItem, len(array))
 		copy(a, array)
-		*result = Matches(a)
+		*result = SearchResults(a)
 	}
 	return result
 }
@@ -234,35 +270,47 @@ func handleError(w http.ResponseWriter, err error) bool {
 
 // writes the list of existing to-do list arguments
 func writeItems(w http.ResponseWriter, r *http.Request) {
-	// TODO: use real content
-	// and this isn't really right b/c State field in record is now a string
-	const todoItem = `<li>
-<font color="green">{{.Description}}</font>,
- due on <b><i>{{.DueDate}}</i></b>
-<form action="/updateTask" method="post">
-  <div><textarea hidden="true" name="description" value="{{.Description}}"></div>
-  <div><input hidden="true" type="date" name="dueDate" value="{{.DueDate}}"></div>
-  <div><input type="checkbox" name="state" value="{{.State}}"></div>
-  <div><input type="submit" value="Save Todo Item"></div>
-</form>
+	var (
+		funcMap = template.FuncMap{
+			"Equal":   func(a, b string) bool { return a == b },
+			"FmtDate": func(d time.Time) string { return d.Format("2006-01-02") },
+			"FmtKey":  func(k datastore.Key) int64 { return k.IntID() },
+		}
+	)
+
+	const todoItem = `<li>{{if Equal .Value.State "completed"}}<strike>{{else}}{{end}}
+<font color="green">{{.Value.Description}}</font>,
+due on <b><i>{{.Value.DueDate}}</i></b>
+{{if Equal .Value.State "completed"}}</strike>{{else}}{{end}}
+ <form action="/updateTask" method="post">
+<p style="border-style:groove;border-width:3px;border-color:pink">
+   <textarea name="description">{{.Value.Description}}</textarea>
+   <input type="date" name="dueDate" value="{{FmtDate .Value.DueDate}}">
+   <input type="checkbox" name="state" {{if Equal .Value.State "completed"}}checked{{else}}{{end}}>
+   <input hidden=true name="id" value={{FmtKey .Key}}>
+   <input type="submit" value="Save Todo Item">
+</p>
+ </form>
 </li>
-`
+` // However, the record has no ItemId field...
+
 	fmt.Fprintf(w, "<!-- in writeItems! -->")
 
-	todoItemT, err := template.New("todoItem").Parse(todoItem)
+	todoItemT, err := template.New("todoItem").Funcs(funcMap).Parse(todoItem)
 	if !handleError(w, err) {
 		//		fmt.Fprintf(w, "Created template")
 		// create AppEngine context
 		ctx := appengine.NewContext(r)
 
-		items := listTodoItems(ctx, w)
+		items := listTodoItems(ctx)
 		//		fmt.Fprintf(w, "Called listTodoItems")
 		switch (*items).(type) {
 		case Matches:
 			{
-				itemList := ([]TodoItem)((*items).(Matches))
+				itemList := ([]Match)((*items).(Matches))
 				//				fmt.Fprintf(w, "Got %d items\n", len(itemList))
 				for _, r := range itemList {
+					//					fmt.Fprintf(w, "Item: %", r)
 					err = todoItemT.Execute(w, r)
 					// ignore the return value: if there's an error
 					// rendering one item, we still try to render the
@@ -270,12 +318,17 @@ func writeItems(w http.ResponseWriter, r *http.Request) {
 					handleError(w, err)
 				}
 			}
-		case E, TodoItem, TodoID:
+		case TodoItem, TodoID:
 			{
-				//				fmt.Fprintf(w, "Wrong result from listTodoItems")
+				fmt.Fprintf(w, "Wrong result from listTodoItems")
 				http.Error(w, "Internal error: listTodoItems didn't return a list of items", http.StatusInternalServerError)
 			}
+		case E:
+			{
+				http.Error(w, ((string)((*items).(E))), http.StatusInternalServerError)
+			}
 		}
+
 	}
 }
 
@@ -352,6 +405,37 @@ func putTodoHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		id := writeTodoItem(ctx, description, d, false)
 		respondWith(w, *id)
+	}
+}
+
+// The same as putTodoHandler, but it expects there to be an "id" parameter.
+// It then writes a new record with that id, overwriting the old one.
+func updateTaskHandler(w http.ResponseWriter, r *http.Request) {
+	// create AppEngine context
+	ctx := appengine.NewContext(r)
+
+	// get description from request
+	description := r.FormValue("description")
+	// get due date from request
+	dueDate := r.FormValue("dueDate")
+	d, err := time.Parse("2006-01-02", dueDate)
+	// get item ID from request
+	id := r.FormValue("id")
+	itemID, err1 := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		http.Error(w, dueDate+" doesn't look like a valid date to me!",
+			400)
+	} else if err1 != nil {
+		http.Error(w, id+" doesn't look like an item ID to me!",
+			400)
+	} else {
+		state := r.FormValue("state")
+		respondWith(w, *(updateTodoItem(ctx,
+			description,
+			d,
+			state == "on",
+			itemID)))
+		rootHandler(w, r)
 	}
 }
 

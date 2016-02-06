@@ -16,6 +16,7 @@ import (
 	"google.golang.org/appengine/datastore"
 	"google.golang.org/appengine/search"
 	"google.golang.org/appengine/taskqueue"
+	"google.golang.org/appengine/user"
 )
 
 func init() {
@@ -282,13 +283,17 @@ func addReminder(ctx context.Context, item TodoItem) *MaybeError {
 	switch (*maybeBlob).(type) {
 	case Blob:
 		{
-			item1 := ([]bytes)(maybeBlob.(Blob))
+			item1 := ([]byte)((*maybeBlob).(Blob))
 			t := &taskqueue.Task{
-				Payload: []byte(itemToJson(item1)),
+				Payload: []byte(item1),
 				Method:  "PULL",
 			}
 			_, err := taskqueue.Add(ctx, t, "reminders")
-			handleError(err)
+			if err != nil {
+				var result = new(MaybeError)
+				*result = E(err.Error())
+				return result
+			}
 		}
 	case E:
 		{
@@ -296,19 +301,28 @@ func addReminder(ctx context.Context, item TodoItem) *MaybeError {
 		}
 	case TodoItem, Matches, TodoID:
 		{
-			return &E("strange result from JSON encoder")
+			var result = new(MaybeError)
+			*result = E("strange result from JSON encoder")
+			return result
 		}
 	}
+	var result = new(MaybeError)
+	*result = Ok{}
+	return result
 }
 
-func itemToJson(item TodoItem) MaybeError {
+func itemToJson(item TodoItem) *MaybeError {
 	b := new(bytes.Buffer)
 	e := json.NewEncoder(b)
-	err := e.encode(item)
+	err := e.Encode(item)
 	if err != nil {
-		return &E("error trying to encode item")
+		var result = new(MaybeError)
+		*result = E("error trying to encode item")
+		return result
 	}
-	return b
+	var result = new(MaybeError)
+	*result = Blob(b.Bytes())
+	return result
 }
 
 // Returns true if err != nil
@@ -397,6 +411,14 @@ func makeNewItemForm(w http.ResponseWriter) {
 }
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := appengine.NewContext(r)
+	u := user.Current(ctx)
+	if u == nil {
+		url, _ := user.LoginURL(ctx, "/")
+		fmt.Fprintf(w, `<a href="%s">Sign in or register</a>`, url)
+		return
+	}
+
 	fmt.Fprint(w, `<html><h1>Hi! Welcome to Tada</h1>`)
 
 	fmt.Fprint(w, "<!-- About to call writeItems -->")
@@ -406,6 +428,9 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, `</ol>`)
 
 	fmt.Fprint(w, "<!-- Called writeItems -->")
+
+	url, _ := user.LogoutURL(ctx, "/")
+	fmt.Fprintf(w, `Welcome, %s! (<a href="%s">sign out</a>)`, u, url)
 
 	fmt.Fprint(w, `</html>`)
 

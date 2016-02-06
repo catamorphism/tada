@@ -27,6 +27,7 @@ func init() {
 }
 
 type TodoItem struct {
+        OwnerEmail  string    // email address of the user who created this item
 	Description string    // Short description of this task -- 1 sentence or less
 	DueDate     time.Time // Task due date
 	State       string    // "completed" / "incomplete". this is kind of silly but makes it easier to search for completed tasks
@@ -67,7 +68,8 @@ func log(s string) {
 // TODO: would really be better to statically require that Write returns an item and Read returns an ID
 
 // Takes a task description and a due date, returns a todo item ID
-func writeTodoItem(ctx context.Context, description string, dueDate time.Time, state bool) *MaybeError {
+// user is a separate argument for testing reasons
+func writeTodoItem(ctx context.Context, description string, dueDate time.Time, state bool, u *user.User) *MaybeError {
 	var taskState = "incomplete"
 	if state {
 		taskState = "completed"
@@ -193,7 +195,7 @@ func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
 }
 
 // Returns an array of all todo items
-func listTodoItems(ctx context.Context) *MaybeError {
+func listTodoItems(ctx context.Context, u *user.User) *MaybeError {
 	var result = new(MaybeError)
 	var resultList = make([]TodoItem, 0)
 	q := datastore.NewQuery("TodoItem").Order("DueDate")
@@ -221,7 +223,7 @@ func updateTaskState(ctx context.Context, itemID TodoID, completed bool) *MaybeE
 	case TodoItem:
 		{
 			todoItem := (*item).(TodoItem)
-			result = writeTodoItem(ctx, todoItem.Description, todoItem.DueDate, completed)
+			result = writeTodoItem(ctx, todoItem.Description, todoItem.DueDate, completed, user.Current(ctx))
 		}
 	case E:
 		{
@@ -335,7 +337,7 @@ func handleError(w http.ResponseWriter, err error) bool {
 }
 
 // writes the list of existing to-do list arguments
-func writeItems(w http.ResponseWriter, r *http.Request) {
+func writeItems(w http.ResponseWriter, r *http.Request, u *user.User) {
 	var (
 		funcMap = template.FuncMap{
 			"Equal":   func(a, b string) bool { return a == b },
@@ -368,7 +370,7 @@ due on <b><i>{{.Value.DueDate}}</i></b>
 		// create AppEngine context
 		ctx := appengine.NewContext(r)
 
-		items := listTodoItems(ctx)
+		items := listTodoItems(ctx, user.Current(ctx))
 		//		fmt.Fprintf(w, "Called listTodoItems")
 		switch (*items).(type) {
 		case Matches:
@@ -424,7 +426,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "<!-- About to call writeItems -->")
 
 	fmt.Fprint(w, `<ol>`)
-	writeItems(w, r)
+	writeItems(w, r, u)
 	fmt.Fprint(w, `</ol>`)
 
 	fmt.Fprint(w, "<!-- Called writeItems -->")
@@ -480,7 +482,7 @@ func putTodoHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, dueDate+" doesn't look like a valid date to me!",
 			400)
 	} else {
-		id := writeTodoItem(ctx, description, d, false)
+		id := writeTodoItem(ctx, description, d, false, user.Current(ctx))
 		respondWith(w, *id)
 	}
 }

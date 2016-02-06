@@ -8,7 +8,11 @@ import (
 	"google.golang.org/appengine/aetest"
 	"google.golang.org/appengine/datastore"
 	"google.golang.org/appengine/taskqueue"
+	"google.golang.org/appengine/user"
 )
+
+var testUser = user.User { Email: "alice@example.com" }
+var testUser1 = user.User { Email: "bob@example.com" }
 
 func assert(t *testing.T, v bool, error string) {
 	if !v {
@@ -29,7 +33,7 @@ func TestKeyComplete(t *testing.T) {
 	}
 
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
-	k := writeTodoItem(ctx, "hello", dueDate, false)
+	k := writeTodoItem(ctx, "hello", dueDate, false, &testUser)
 	switch (*k).(type) {
 	case TodoID:
 		k1 := (*k).(TodoID)
@@ -49,7 +53,7 @@ func TestReadAfterWrite(t *testing.T) {
 	}
 
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
-	itemId := writeTodoItem(ctx, "finish writing these tests", dueDate, false)
+	itemId := writeTodoItem(ctx, "finish writing these tests", dueDate, false, &testUser)
 	switch (*itemId).(type) {
 	case TodoID:
 		theTodo := readTodoItem(ctx, (*itemId).(TodoID))
@@ -76,9 +80,9 @@ func TestTextSearch(t *testing.T) {
 	}
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
 
-	writeTodoItem(ctx, "phone up my friend", dueDate, false)
-	writeTodoItem(ctx, "buy a new phone", dueDate, false)
-	writeTodoItem(ctx, "feed the fish", dueDate, false)
+	writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser)
+	writeTodoItem(ctx, "buy a new phone", dueDate, false, &testUser)
+	writeTodoItem(ctx, "feed the fish", dueDate, false, &testUser)
 	queryResults := searchTodoItems(ctx, "phone")
 	switch (*queryResults).(type) {
 	case SearchResults:
@@ -101,10 +105,10 @@ func TestListTodo(t *testing.T) {
 	}
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
 
-	writeTodoItem(ctx, "phone up my friend", dueDate, false)
-	writeTodoItem(ctx, "buy a new phone", dueDate, false)
-	writeTodoItem(ctx, "feed the fish", dueDate, false)
-	listResults := listTodoItems(ctx)
+	writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser)
+	writeTodoItem(ctx, "buy a new phone", dueDate, false, &testUser)
+	writeTodoItem(ctx, "feed the fish", dueDate, false, &testUser)
+	listResults := listTodoItems(ctx, &testUser)
 	switch (*listResults).(type) {
 	case Matches:
 		items := ([]Match)((*listResults).(Matches))
@@ -126,7 +130,7 @@ func TestUpdate(t *testing.T) {
 	}
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
 
-	id := writeTodoItem(ctx, "phone up my friend", dueDate, false)
+	id := writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser)
 	switch (*id).(type) {
 	case TodoID:
 		id1 := ((datastore.Key)((*id).(TodoID)))
@@ -162,7 +166,7 @@ func TestEmailReminder(t *testing.T) {
 	}
 
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
-	id := writeTodoItem(ctx, "water my cactus", dueDate, false)
+	id := writeTodoItem(ctx, "water my cactus", dueDate, false, &testUser)
 	switch (*id).(type) {
 	case TodoID:
 		// ((datastore.Key)((*id).(TodoID)))
@@ -173,4 +177,38 @@ func TestEmailReminder(t *testing.T) {
 		t.Fatal("Didn't get a TodoID result from writeTodoItem")
 	}
 	defer done()
+}
+
+func assertList(t *testing.T, x MaybeError) []Match {
+   switch x.(type) {
+     case Matches: {
+        return ([]Match)(x.(Matches))
+     }
+     default: {
+        t.Fail()
+	return nil
+     }
+   }
+}
+
+func TestNoInterference(t *testing.T) {
+     ctx, done, err := aetest.NewContext()
+     if err != nil {
+         t.Fatal(err)
+     }
+     dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)	
+     writeTodoItem(ctx, "Brush my teeth", dueDate, false, &testUser)
+     writeTodoItem(ctx, "Brush my dog", dueDate, false, &testUser1)
+     l := listTodoItems(ctx, &testUser)
+     l1 := listTodoItems(ctx, &testUser1)
+     aliceItems := assertList(t, *l)
+     bobItems := assertList(t, *l1)
+     assert(t, len(aliceItems) == 1, fmt.Sprintf("Alice's todolist has the wrong length: %d", len(aliceItems)))
+     assert(t, len(bobItems) == 1, fmt.Sprintf("Bob's todolist has the wrong length: %d", len(bobItems)))
+     assert(t, aliceItems[0].Value.Description == "Brush my teeth", "Wrong item in Alice's todo list")
+     assert(t, aliceItems[0].Value.OwnerEmail == testUser.Email, "Wrong item owner in Alice's todo list")
+     assert(t, bobItems[0].Value.Description == "Brush my dog", "Wrong item in Bob's todo list")
+     assert(t, bobItems[0].Value.OwnerEmail == testUser1.Email, "Wrong item owner in Bob's todo list")
+ 
+     defer done()
 }

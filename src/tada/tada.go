@@ -14,6 +14,7 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/appengine"
 	"google.golang.org/appengine/datastore"
+	"google.golang.org/appengine/memcache"	
 	"google.golang.org/appengine/search"
 	"google.golang.org/appengine/taskqueue"
 	"google.golang.org/appengine/user"
@@ -41,6 +42,7 @@ type MaybeError interface {
 
 type E string
 type Ok struct{}
+type CacheMiss struct{}
 
 // Used for returning stuff from listTodoItems.
 // Keep the keys and values separate so as not to add a Key field to the item struct
@@ -54,6 +56,7 @@ type Blob []byte
 
 func (err E) isMaybeError()              {}
 func (ok Ok) isMaybeError()              {}
+func (c CacheMiss) isMaybeError()        {}
 func (t_item TodoItem) isMaybeError()    {}
 func (t_id TodoID) isMaybeError()        {}
 func (t_id Matches) isMaybeError()       {}
@@ -69,7 +72,8 @@ func log(s string) {
 
 // Takes a task description and a due date, returns a todo item ID
 // user is a separate argument for testing reasons
-func writeTodoItem(ctx context.Context, description string, dueDate time.Time, state bool, u *user.User) *MaybeError {
+// Adds a reminder iff remind is true
+func writeTodoItem(ctx context.Context, description string, dueDate time.Time, state bool, u *user.User, remind bool) *MaybeError {
 	var taskState = "incomplete"
 	if state {
 		taskState = "completed"
@@ -78,6 +82,7 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 		Description: description,
 		DueDate:     dueDate,
 		State:       taskState,
+		OwnerEmail:  u.Email,
 	}
 	key, err := datastore.Put(ctx, datastore.NewIncompleteKey(ctx, "TodoItem", nil), &item)
 	var result = new(MaybeError)
@@ -87,6 +92,8 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 	} else {
 		log("write succeeded " + key.String())
 		k := TodoID(*key)
+		invalidateCache(ctx, *key)
+		// FIXME should also invalidate all entries for the user or else we'll return a stale todo list
 		*result = k
 		indexResult := indexCommentForSearch(ctx, k)
 		switch (*indexResult).(type) {
@@ -97,7 +104,7 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 		case TodoID, Matches, TodoItem:
 			*result = E("weird answer from indexCommentForSearch")
 		}
-		if !state {
+		if !state && remind {
 			queueResult := addReminder(ctx, item)
 			switch (*queueResult).(type) {
 			case E:
@@ -178,12 +185,19 @@ func indexCommentForSearch(ctx context.Context, itemID TodoID) *MaybeError {
 
 // Takes a todo item ID, returns a todo item
 func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
+// n.b. doesn't check the owner
 	item := new(TodoItem)
 	var err error
 	var result = new(MaybeError)
 	var key = new(datastore.Key)
 	*key = datastore.Key(itemID)
 	log("calling Get on: " + (*key).String())
+	maybeCached := lookupCache(ctx, *key)
+	if(*maybeCached != CacheMiss{}) {
+            // item was cached, return it
+            return maybeCached
+	}
+	
 	if err = datastore.Get(ctx, key, item); err != nil {
 		log("read failed: " + err.Error())
 		*result = E(err.Error())
@@ -191,6 +205,7 @@ func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
 		log("read succeeded with " + item.Description)
 		*result = *item
 	}
+	updateCache(ctx, *key, *item)
 	return (result)
 }
 
@@ -198,32 +213,42 @@ func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
 func listTodoItems(ctx context.Context, u *user.User) *MaybeError {
 	var result = new(MaybeError)
 	var resultList = make([]TodoItem, 0)
-	q := datastore.NewQuery("TodoItem").Order("DueDate")
+	// filter by user
+	log(fmt.Sprintf("Making query, email = %s", u.Email))
+
+        maybeCached := lookupCacheByOwner(ctx, u.Email)
+	if(*maybeCached != CacheMiss{}) {
+	     // item was cached, return it
+	     return maybeCached
+	}
+	
+	q := datastore.NewQuery("TodoItem").Filter("OwnerEmail=", u.Email).Order("DueDate")
 	keys, err := q.GetAll(ctx, &resultList)
 	if err != nil {
-		//		fmt.Fprintf(w, "listTodoItems got %d keys err = %s", len(keys), err.Error())
+		log(fmt.Sprintf("listTodoItems got %d keys err = %s", len(keys), err.Error()))
 		*result = E(err.Error())
 	} else {
-		//		fmt.Fprintf(w, "got %d items\n", len(keys))
+		log(fmt.Sprintf("got %d items %s\n", len(keys), u.Email))
 		// *assuming* these are going to be in the same order...
 		var matches = make([]Match, 0)
 		for i, k := range keys {
 			matches = append(matches, Match{k, resultList[i]})
 		}
 		*result = Matches(matches)
+		updateCacheByOwner(ctx, u.Email, matches)
 	}
 	return result
 }
 
 // change a todo item's state from "completed" to "incomplete" or vice versa
-func updateTaskState(ctx context.Context, itemID TodoID, completed bool) *MaybeError {
+func updateTaskState(ctx context.Context, itemID TodoID, completed bool, remind bool) *MaybeError {
 	item := readTodoItem(ctx, itemID)
 	var result = new(MaybeError)
 	switch (*item).(type) {
 	case TodoItem:
 		{
 			todoItem := (*item).(TodoItem)
-			result = writeTodoItem(ctx, todoItem.Description, todoItem.DueDate, completed, user.Current(ctx))
+			result = writeTodoItem(ctx, todoItem.Description, todoItem.DueDate, completed, user.Current(ctx), remind)
 		}
 	case E:
 		{
@@ -325,6 +350,46 @@ func itemToJson(item TodoItem) *MaybeError {
 	var result = new(MaybeError)
 	*result = Blob(b.Bytes())
 	return result
+}
+
+func matchesToJson(items Matches) *MaybeError {
+	b := new(bytes.Buffer)
+	e := json.NewEncoder(b)
+	err := e.Encode(items)
+	if err != nil {
+		var result = new(MaybeError)
+		*result = E("error trying to encode matches")
+		return result
+	}
+	var result = new(MaybeError)
+	*result = Blob(b.Bytes())
+	return result
+}
+
+func jsonToTodoItem(blob []byte) *MaybeError {
+    d := json.NewDecoder(bytes.NewReader(blob))
+    var item = new(TodoItem)
+    var result = new(MaybeError)
+    err := d.Decode(&item)
+    if err != nil {
+       *result = E(err.Error())
+    } else {
+       *result = item
+    }
+    return result
+}
+
+func jsonToMatches(blob []byte) *MaybeError {
+    d := json.NewDecoder(bytes.NewReader(blob))
+    var items = new(Matches)
+    var result = new(MaybeError)
+    err := d.Decode(&items)
+    if err != nil {
+       *result = E(err.Error())
+    } else {
+       *result = items
+    }
+    return result
 }
 
 // Returns true if err != nil
@@ -482,7 +547,7 @@ func putTodoHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, dueDate+" doesn't look like a valid date to me!",
 			400)
 	} else {
-		id := writeTodoItem(ctx, description, d, false, user.Current(ctx))
+		id := writeTodoItem(ctx, description, d, false, user.Current(ctx), true)
 		respondWith(w, *id)
 	}
 }
@@ -531,4 +596,81 @@ func respondWith(w http.ResponseWriter, result MaybeError) {
 		item := result.(TodoItem)
 		fmt.Fprintf(w, "item: %s due %d", item.Description, item.DueDate)
 	}
+}
+
+/*
+	type CacheMiss
+	func invalidateCache(key)
+	func lookupCache(key)
+	func updateCache(key, item)
+	func lookupCacheByOwner(email)
+	func updateCacheByOwner(email, itemlist)
+
+That said, I'm not sure aggregating all the items for one owner is a good idea.
+If any item changes you have to invalidate all of them.
+Instead, might want to use listTodoItems so it uses the same code as readTodoItem
+*/
+
+func invalidateCache(ctx context.Context, key datastore.Key) *MaybeError {
+     // delete key from memcache
+     err := memcache.Delete(ctx, key.String())
+     var result = new(MaybeError)
+     if err != nil {
+        *result = E(err.Error())
+     } else {
+        *result = Ok{}
+     }
+     return result
+}
+
+func lookupCache(ctx context.Context, key datastore.Key) *MaybeError {
+   maybeItem, err := memcache.Get(ctx, key.String())
+   var result = new(MaybeError)
+   if err != nil { // treat all errors as "cache miss"
+      *result = CacheMiss{}
+   } else {
+      result = jsonToTodoItem(maybeItem.Value)
+   }
+   return result
+}
+
+func updateCache(ctx context.Context, key datastore.Key, item TodoItem) {
+   var result = itemToJson(item)
+   switch (*result).(type) {
+      case Blob:
+         blob := ([]byte)((*result).(Blob))
+	 item := memcache.Item {
+	      Key: key.String(),
+	      Value: blob,
+	 }
+         memcache.Set(ctx, &item) // ignore errors... worst that can happen is we get a cache miss later
+      default:
+            break
+   }		   
+}
+
+func lookupCacheByOwner(ctx context.Context, email string) *MaybeError {
+   maybeItem, err := memcache.Get(ctx, email) // ??
+   var result = new(MaybeError)
+   if err != nil {
+       *result = CacheMiss{}
+   } else {
+       result = jsonToMatches(maybeItem.Value)
+   }
+   return result
+}
+
+func updateCacheByOwner(ctx context.Context, email string, items Matches) {
+   var result = matchesToJson(items)
+   switch(*result).(type) {
+      case Blob:
+         blob := ([]byte)((*result).(Blob))
+	 item := memcache.Item {
+   	 	Key: email,
+		Value: blob,
+  	 }			
+         memcache.Set(ctx, &item) // ignore errors; worst that can happen is a cache miss
+      default:
+         break
+   }
 }

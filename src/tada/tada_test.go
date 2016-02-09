@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/appengine/aetest"
 	"google.golang.org/appengine/datastore"
-	"google.golang.org/appengine/taskqueue"
+//	"google.golang.org/appengine/taskqueue"
 	"google.golang.org/appengine/user"
 )
 
@@ -33,7 +33,7 @@ func TestKeyComplete(t *testing.T) {
 	}
 
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
-	k := writeTodoItem(ctx, "hello", dueDate, false, &testUser)
+	k := writeTodoItem(ctx, "hello", dueDate, false, &testUser, false)
 	switch (*k).(type) {
 	case TodoID:
 		k1 := (*k).(TodoID)
@@ -53,7 +53,7 @@ func TestReadAfterWrite(t *testing.T) {
 	}
 
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
-	itemId := writeTodoItem(ctx, "finish writing these tests", dueDate, false, &testUser)
+	itemId := writeTodoItem(ctx, "finish writing these tests", dueDate, false, &testUser, false)
 	switch (*itemId).(type) {
 	case TodoID:
 		theTodo := readTodoItem(ctx, (*itemId).(TodoID))
@@ -80,9 +80,9 @@ func TestTextSearch(t *testing.T) {
 	}
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
 
-	writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser)
-	writeTodoItem(ctx, "buy a new phone", dueDate, false, &testUser)
-	writeTodoItem(ctx, "feed the fish", dueDate, false, &testUser)
+	writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser, false)
+	writeTodoItem(ctx, "buy a new phone", dueDate, false, &testUser, false)
+	writeTodoItem(ctx, "feed the fish", dueDate, false, &testUser, false)
 	queryResults := searchTodoItems(ctx, "phone")
 	switch (*queryResults).(type) {
 	case SearchResults:
@@ -105,9 +105,9 @@ func TestListTodo(t *testing.T) {
 	}
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
 
-	writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser)
-	writeTodoItem(ctx, "buy a new phone", dueDate, false, &testUser)
-	writeTodoItem(ctx, "feed the fish", dueDate, false, &testUser)
+	writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser, false)
+	writeTodoItem(ctx, "buy a new phone", dueDate, false, &testUser, false)
+	writeTodoItem(ctx, "feed the fish", dueDate, false, &testUser, false)
 	listResults := listTodoItems(ctx, &testUser)
 	switch (*listResults).(type) {
 	case Matches:
@@ -130,7 +130,7 @@ func TestUpdate(t *testing.T) {
 	}
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
 
-	id := writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser)
+	id := writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser, false)
 	switch (*id).(type) {
 	case TodoID:
 		id1 := ((datastore.Key)((*id).(TodoID)))
@@ -156,6 +156,9 @@ func TestUpdate(t *testing.T) {
 	defer done()
 }
 
+
+// Not sure how to test this one or if there's a way to test task queues
+/*
 // actually want to do auth first
 func TestEmailReminder(t *testing.T) {
 	// Add a new todo item. Check that there's an item in the pull queue
@@ -166,7 +169,7 @@ func TestEmailReminder(t *testing.T) {
 	}
 
 	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
-	id := writeTodoItem(ctx, "water my cactus", dueDate, false, &testUser)
+	id := writeTodoItem(ctx, "water my cactus", dueDate, false, &testUser, false)
 	switch (*id).(type) {
 	case TodoID:
 		// ((datastore.Key)((*id).(TodoID)))
@@ -178,6 +181,7 @@ func TestEmailReminder(t *testing.T) {
 	}
 	defer done()
 }
+*/
 
 func assertList(t *testing.T, x MaybeError) []Match {
    switch x.(type) {
@@ -197,18 +201,28 @@ func TestNoInterference(t *testing.T) {
          t.Fatal(err)
      }
      dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)	
-     writeTodoItem(ctx, "Brush my teeth", dueDate, false, &testUser)
-     writeTodoItem(ctx, "Brush my dog", dueDate, false, &testUser1)
+     writeTodoItem(ctx, "Brush my teeth", dueDate, false, &testUser, false)
+     writeTodoItem(ctx, "Brush my dog", dueDate, false, &testUser1, false)
      l := listTodoItems(ctx, &testUser)
      l1 := listTodoItems(ctx, &testUser1)
      aliceItems := assertList(t, *l)
      bobItems := assertList(t, *l1)
      assert(t, len(aliceItems) == 1, fmt.Sprintf("Alice's todolist has the wrong length: %d", len(aliceItems)))
      assert(t, len(bobItems) == 1, fmt.Sprintf("Bob's todolist has the wrong length: %d", len(bobItems)))
-     assert(t, aliceItems[0].Value.Description == "Brush my teeth", "Wrong item in Alice's todo list")
-     assert(t, aliceItems[0].Value.OwnerEmail == testUser.Email, "Wrong item owner in Alice's todo list")
-     assert(t, bobItems[0].Value.Description == "Brush my dog", "Wrong item in Bob's todo list")
-     assert(t, bobItems[0].Value.OwnerEmail == testUser1.Email, "Wrong item owner in Bob's todo list")
- 
+     if(len(aliceItems) == 1 && len(bobItems) == 1) {
+          assert(t, aliceItems[0].Value.Description == "Brush my teeth", "Wrong item in Alice's todo list")
+     	  assert(t, aliceItems[0].Value.OwnerEmail == testUser.Email, "Wrong item owner in Alice's todo list")
+     	  assert(t, bobItems[0].Value.Description == "Brush my dog", "Wrong item in Bob's todo list")
+     	  assert(t, bobItems[0].Value.OwnerEmail == testUser1.Email, "Wrong item owner in Bob's todo list")
+     }
      defer done()
 }
+
+// Apparently there's no way to test task queues? https://code.google.com/p/googleappengine/issues/detail?id=10771
+
+// No, it does seem to work: //depot/google3/third_party/golang/appengine/taskqueue/taskqueue_test.go
+// no, that's only for internal AppEngine testing. "taskqueue execution is not supported in the test environment." Whatever.
+
+// memcache tests:
+// read an item; check that the item is in the cache
+// write a new item; read it back; modify the due date; check that we see the change

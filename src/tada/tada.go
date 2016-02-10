@@ -14,7 +14,7 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/appengine"
 	"google.golang.org/appengine/datastore"
-	"google.golang.org/appengine/memcache"	
+	"google.golang.org/appengine/memcache"
 	"google.golang.org/appengine/search"
 	"google.golang.org/appengine/taskqueue"
 	"google.golang.org/appengine/user"
@@ -28,7 +28,7 @@ func init() {
 }
 
 type TodoItem struct {
-        OwnerEmail  string    // email address of the user who created this item
+	OwnerEmail  string    // email address of the user who created this item
 	Description string    // Short description of this task -- 1 sentence or less
 	DueDate     time.Time // Task due date
 	State       string    // "completed" / "incomplete". this is kind of silly but makes it easier to search for completed tasks
@@ -120,12 +120,13 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 }
 
 // Takes a task description and a due date, along with an id, returns OK or an error
-func updateTodoItem(ctx context.Context, description string, dueDate time.Time, state bool, id int64) *MaybeError {
+func updateTodoItem(ctx context.Context, email string, description string, dueDate time.Time, state bool, id int64) *MaybeError {
 	var taskState = "incomplete"
 	if state {
 		taskState = "completed"
 	}
 	item := TodoItem{
+		OwnerEmail:  email,
 		Description: description,
 		DueDate:     dueDate,
 		State:       taskState,
@@ -142,6 +143,7 @@ func updateTodoItem(ctx context.Context, description string, dueDate time.Time, 
 		*result = E(err.Error())
 	} else {
 		log("update succeeded " + key.String())
+		updateCache(ctx, *key, item)
 		indexResult := indexCommentForSearch(ctx, TodoID(*key))
 		switch (*indexResult).(type) {
 		case E:
@@ -185,7 +187,7 @@ func indexCommentForSearch(ctx context.Context, itemID TodoID) *MaybeError {
 
 // Takes a todo item ID, returns a todo item
 func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
-// n.b. doesn't check the owner
+	// n.b. doesn't check the owner
 	item := new(TodoItem)
 	var err error
 	var result = new(MaybeError)
@@ -193,11 +195,11 @@ func readTodoItem(ctx context.Context, itemID TodoID) *MaybeError {
 	*key = datastore.Key(itemID)
 	log("calling Get on: " + (*key).String())
 	maybeCached := lookupCache(ctx, *key)
-	if(*maybeCached != CacheMiss{}) {
-            // item was cached, return it
-            return maybeCached
+	if (*maybeCached != CacheMiss{}) {
+		// item was cached, return it
+		return maybeCached
 	}
-	
+
 	if err = datastore.Get(ctx, key, item); err != nil {
 		log("read failed: " + err.Error())
 		*result = E(err.Error())
@@ -216,12 +218,12 @@ func listTodoItems(ctx context.Context, u *user.User) *MaybeError {
 	// filter by user
 	log(fmt.Sprintf("Making query, email = %s", u.Email))
 
-        maybeCached := lookupCacheByOwner(ctx, u.Email)
-	if(*maybeCached != CacheMiss{}) {
-	     // item was cached, return it
-	     return maybeCached
+	maybeCached := lookupCacheByOwner(ctx, u.Email)
+	if (*maybeCached != CacheMiss{}) {
+		// item was cached, return it
+		return maybeCached
 	}
-	
+
 	q := datastore.NewQuery("TodoItem").Filter("OwnerEmail=", u.Email).Order("DueDate")
 	keys, err := q.GetAll(ctx, &resultList)
 	if err != nil {
@@ -367,29 +369,31 @@ func matchesToJson(items Matches) *MaybeError {
 }
 
 func jsonToTodoItem(blob []byte) *MaybeError {
-    d := json.NewDecoder(bytes.NewReader(blob))
-    var item = new(TodoItem)
-    var result = new(MaybeError)
-    err := d.Decode(&item)
-    if err != nil {
-       *result = E(err.Error())
-    } else {
-       *result = item
-    }
-    return result
+	d := json.NewDecoder(bytes.NewReader(blob))
+	var item = new(TodoItem)
+	var result = new(MaybeError)
+	err := d.Decode(&item)
+	if err != nil {
+		log(fmt.Sprintf("jsonToTodoItem: returning ", err.Error()))
+		*result = E(err.Error())
+	} else {
+		log(fmt.Sprintf("jsonToDoItem: returning item owner=(%s) desc=(%s) due=(%s) ", item.OwnerEmail, item.Description, item.DueDate))
+		*result = *item
+	}
+	return result
 }
 
 func jsonToMatches(blob []byte) *MaybeError {
-    d := json.NewDecoder(bytes.NewReader(blob))
-    var items = new(Matches)
-    var result = new(MaybeError)
-    err := d.Decode(&items)
-    if err != nil {
-       *result = E(err.Error())
-    } else {
-       *result = items
-    }
-    return result
+	d := json.NewDecoder(bytes.NewReader(blob))
+	var items = new(Matches)
+	var result = new(MaybeError)
+	err := d.Decode(&items)
+	if err != nil {
+		*result = E(err.Error())
+	} else {
+		*result = items
+	}
+	return result
 }
 
 // Returns true if err != nil
@@ -566,6 +570,8 @@ func updateTaskHandler(w http.ResponseWriter, r *http.Request) {
 	// get item ID from request
 	id := r.FormValue("id")
 	itemID, err1 := strconv.ParseInt(id, 10, 64)
+	// get user from logged-in user
+	email := user.Current(ctx).Email
 	if err != nil {
 		http.Error(w, dueDate+" doesn't look like a valid date to me!",
 			400)
@@ -575,6 +581,7 @@ func updateTaskHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		state := r.FormValue("state")
 		respondWith(w, *(updateTodoItem(ctx,
+			email,
 			description,
 			d,
 			state == "on",
@@ -612,65 +619,65 @@ Instead, might want to use listTodoItems so it uses the same code as readTodoIte
 */
 
 func invalidateCache(ctx context.Context, key datastore.Key) *MaybeError {
-     // delete key from memcache
-     err := memcache.Delete(ctx, key.String())
-     var result = new(MaybeError)
-     if err != nil {
-        *result = E(err.Error())
-     } else {
-        *result = Ok{}
-     }
-     return result
+	// delete key from memcache
+	err := memcache.Delete(ctx, key.String())
+	var result = new(MaybeError)
+	if err != nil {
+		*result = E(err.Error())
+	} else {
+		*result = Ok{}
+	}
+	return result
 }
 
 func lookupCache(ctx context.Context, key datastore.Key) *MaybeError {
-   maybeItem, err := memcache.Get(ctx, key.String())
-   var result = new(MaybeError)
-   if err != nil { // treat all errors as "cache miss"
-      *result = CacheMiss{}
-   } else {
-      result = jsonToTodoItem(maybeItem.Value)
-   }
-   return result
+	maybeItem, err := memcache.Get(ctx, key.String())
+	var result = new(MaybeError)
+	if err != nil { // treat all errors as "cache miss"
+		*result = CacheMiss{}
+	} else {
+		result = jsonToTodoItem(maybeItem.Value)
+	}
+	return result
 }
 
 func updateCache(ctx context.Context, key datastore.Key, item TodoItem) {
-   var result = itemToJson(item)
-   switch (*result).(type) {
-      case Blob:
-         blob := ([]byte)((*result).(Blob))
-	 item := memcache.Item {
-	      Key: key.String(),
-	      Value: blob,
-	 }
-         memcache.Set(ctx, &item) // ignore errors... worst that can happen is we get a cache miss later
-      default:
-            break
-   }		   
+	var result = itemToJson(item)
+	switch (*result).(type) {
+	case Blob:
+		blob := ([]byte)((*result).(Blob))
+		item := memcache.Item{
+			Key:   key.String(),
+			Value: blob,
+		}
+		memcache.Set(ctx, &item) // ignore errors... worst that can happen is we get a cache miss later
+	default:
+		break
+	}
 }
 
 func lookupCacheByOwner(ctx context.Context, email string) *MaybeError {
-   maybeItem, err := memcache.Get(ctx, email) // ??
-   var result = new(MaybeError)
-   if err != nil {
-       *result = CacheMiss{}
-   } else {
-       result = jsonToMatches(maybeItem.Value)
-   }
-   return result
+	maybeItem, err := memcache.Get(ctx, email) // ??
+	var result = new(MaybeError)
+	if err != nil {
+		*result = CacheMiss{}
+	} else {
+		result = jsonToMatches(maybeItem.Value)
+	}
+	return result
 }
 
 func updateCacheByOwner(ctx context.Context, email string, items Matches) {
-   var result = matchesToJson(items)
-   switch(*result).(type) {
-      case Blob:
-         blob := ([]byte)((*result).(Blob))
-	 item := memcache.Item {
-   	 	Key: email,
-		Value: blob,
-  	 }			
-         memcache.Set(ctx, &item) // ignore errors; worst that can happen is a cache miss
-      default:
-         break
-   }
+	var result = matchesToJson(items)
+	switch (*result).(type) {
+	case Blob:
+		blob := ([]byte)((*result).(Blob))
+		item := memcache.Item{
+			Key:   email,
+			Value: blob,
+		}
+		memcache.Set(ctx, &item) // ignore errors; worst that can happen is a cache miss
+	default:
+		break
+	}
 }

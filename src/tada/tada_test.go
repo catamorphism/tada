@@ -7,12 +7,13 @@ import (
 
 	"google.golang.org/appengine/aetest"
 	"google.golang.org/appengine/datastore"
-//	"google.golang.org/appengine/taskqueue"
+	//	"google.golang.org/appengine/taskqueue"
+	"google.golang.org/appengine/memcache"
 	"google.golang.org/appengine/user"
 )
 
-var testUser = user.User { Email: "alice@example.com" }
-var testUser1 = user.User { Email: "bob@example.com" }
+var testUser = user.User{Email: "alice@example.com"}
+var testUser1 = user.User{Email: "bob@example.com"}
 
 func assert(t *testing.T, v bool, error string) {
 	if !v {
@@ -88,9 +89,9 @@ func TestTextSearch(t *testing.T) {
 	case SearchResults:
 		items := ([]TodoItem)((*queryResults).(SearchResults))
 		assert(t, len(items) == 2, "wrong number of search results")
-		// I don't know if the order is deterministic, but *shrug*
-		assert(t, items[0].Description == "buy a new phone", "wrong first task: found "+items[0].Description)
-		assert(t, items[1].Description == "phone up my friend", "wrong second task: found "+items[1].Description)
+		// order is *not* deterministic
+		assert(t, items[0].Description == "buy a new phone" || items[1].Description == "buy a new phone", "neither task had description 'buy a new phone'")
+		assert(t, items[0].Description == "phone up my friend" || items[1].Description == "phone up my friend", "neither task had description 'phone up my friend'")
 	case E, TodoID, TodoItem, Matches:
 		t.Fatal("Didn't get a SearchResults result from a search")
 	}
@@ -134,7 +135,7 @@ func TestUpdate(t *testing.T) {
 	switch (*id).(type) {
 	case TodoID:
 		id1 := ((datastore.Key)((*id).(TodoID)))
-		result := updateTodoItem(ctx, "phone up my friend", dueDate, true, id1.IntID())
+		result := updateTodoItem(ctx, testUser.Email, "phone up my friend", dueDate, true, id1.IntID())
 		switch (*result).(type) {
 		case Ok:
 		case Matches, E, TodoID, TodoItem:
@@ -145,7 +146,7 @@ func TestUpdate(t *testing.T) {
 		case TodoItem:
 			item1 := (*item).(TodoItem)
 			assert(t, item1.Description == "phone up my friend", "wrong description")
-			assert(t, item1.DueDate == dueDate.Local(), fmt.Sprintf("wrong date: expected %s, found %s", dueDate, item1.DueDate))
+			assert(t, item1.DueDate == dueDate, fmt.Sprintf("wrong date: expected %s, found %s [%s] {%s}", dueDate, item1.DueDate, dueDate.Sub(item1.DueDate), dueDate == item1.DueDate))
 			assert(t, item1.State == "completed", "expected to be completed, saw incompleted")
 		case E, TodoID, Matches:
 			t.Fatal("Didn't get a TodoItem result from readTodoItem")
@@ -155,7 +156,6 @@ func TestUpdate(t *testing.T) {
 	}
 	defer done()
 }
-
 
 // Not sure how to test this one or if there's a way to test task queues
 /*
@@ -184,38 +184,40 @@ func TestEmailReminder(t *testing.T) {
 */
 
 func assertList(t *testing.T, x MaybeError) []Match {
-   switch x.(type) {
-     case Matches: {
-        return ([]Match)(x.(Matches))
-     }
-     default: {
-        t.Fail()
-	return nil
-     }
-   }
+	switch x.(type) {
+	case Matches:
+		{
+			return ([]Match)(x.(Matches))
+		}
+	default:
+		{
+			t.Fail()
+			return nil
+		}
+	}
 }
 
 func TestNoInterference(t *testing.T) {
-     ctx, done, err := aetest.NewContext()
-     if err != nil {
-         t.Fatal(err)
-     }
-     dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)	
-     writeTodoItem(ctx, "Brush my teeth", dueDate, false, &testUser, false)
-     writeTodoItem(ctx, "Brush my dog", dueDate, false, &testUser1, false)
-     l := listTodoItems(ctx, &testUser)
-     l1 := listTodoItems(ctx, &testUser1)
-     aliceItems := assertList(t, *l)
-     bobItems := assertList(t, *l1)
-     assert(t, len(aliceItems) == 1, fmt.Sprintf("Alice's todolist has the wrong length: %d", len(aliceItems)))
-     assert(t, len(bobItems) == 1, fmt.Sprintf("Bob's todolist has the wrong length: %d", len(bobItems)))
-     if(len(aliceItems) == 1 && len(bobItems) == 1) {
-          assert(t, aliceItems[0].Value.Description == "Brush my teeth", "Wrong item in Alice's todo list")
-     	  assert(t, aliceItems[0].Value.OwnerEmail == testUser.Email, "Wrong item owner in Alice's todo list")
-     	  assert(t, bobItems[0].Value.Description == "Brush my dog", "Wrong item in Bob's todo list")
-     	  assert(t, bobItems[0].Value.OwnerEmail == testUser1.Email, "Wrong item owner in Bob's todo list")
-     }
-     defer done()
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
+	writeTodoItem(ctx, "Brush my teeth", dueDate, false, &testUser, false)
+	writeTodoItem(ctx, "Brush my dog", dueDate, false, &testUser1, false)
+	l := listTodoItems(ctx, &testUser)
+	l1 := listTodoItems(ctx, &testUser1)
+	aliceItems := assertList(t, *l)
+	bobItems := assertList(t, *l1)
+	assert(t, len(aliceItems) == 1, fmt.Sprintf("Alice's todolist has the wrong length: %d", len(aliceItems)))
+	assert(t, len(bobItems) == 1, fmt.Sprintf("Bob's todolist has the wrong length: %d", len(bobItems)))
+	if len(aliceItems) == 1 && len(bobItems) == 1 {
+		assert(t, aliceItems[0].Value.Description == "Brush my teeth", "Wrong item in Alice's todo list")
+		assert(t, aliceItems[0].Value.OwnerEmail == testUser.Email, "Wrong item owner in Alice's todo list")
+		assert(t, bobItems[0].Value.Description == "Brush my dog", "Wrong item in Bob's todo list")
+		assert(t, bobItems[0].Value.OwnerEmail == testUser1.Email, "Wrong item owner in Bob's todo list")
+	}
+	defer done()
 }
 
 // Apparently there's no way to test task queues? https://code.google.com/p/googleappengine/issues/detail?id=10771
@@ -223,6 +225,83 @@ func TestNoInterference(t *testing.T) {
 // No, it does seem to work: //depot/google3/third_party/golang/appengine/taskqueue/taskqueue_test.go
 // no, that's only for internal AppEngine testing. "taskqueue execution is not supported in the test environment." Whatever.
 
-// memcache tests:
 // read an item; check that the item is in the cache
+func TestMemcacheRead(t *testing.T) {
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
+
+	id := writeTodoItem(ctx, "Brush my teeth", dueDate, false, &testUser, false)
+	switch (*id).(type) {
+	case TodoID:
+		id1 := (*id).(TodoID)
+		item := readTodoItem(ctx, id1)
+		switch (*item).(type) {
+		case TodoItem:
+			read_item := (*item).(TodoItem)
+			k := datastore.Key(id1)
+			cache_item, err := memcache.Get(ctx, k.String())
+			if err != nil {
+				t.Fatal("memcache error")
+			}
+			cache_value := jsonToTodoItem(cache_item.Value)
+			switch (*cache_value).(type) {
+			case TodoItem:
+				cached_item := (*cache_value).(TodoItem)
+				assert(t, read_item == cached_item, "Cached todo item differs from the original item")
+			default:
+				t.Fatal("memcache.Get returned a weird result")
+			}
+		default:
+			t.Fatal("readTodoItem returned a weird result")
+		}
+	default:
+		t.Fatal("writeTodoItem returned a weird result")
+	}
+	defer done()
+}
+
 // write a new item; read it back; modify the due date; check that we see the change
+func TestMemcacheUpdate(t *testing.T) {
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
+	dueDate1 := time.Date(2016, 3, 12, 13, 0, 0, 0, time.UTC)
+
+	id := writeTodoItem(ctx, "Brush my teeth", dueDate, false, &testUser, false)
+	switch (*id).(type) {
+	case TodoID:
+		id1 := (*id).(TodoID)
+		item := readTodoItem(ctx, id1)
+		t.Log("item = ", *item)
+		switch (*item).(type) {
+		case TodoItem:
+			int_id := datastore.Key(id1)
+			updateTodoItem(ctx, testUser.Email, "Brush my teeth", dueDate1, false, int_id.IntID())
+			cached_value, err := memcache.Get(ctx, int_id.String())
+			if err != nil {
+				t.Fatal("memcache.Get returned a weird result")
+			}
+			parsed_value := jsonToTodoItem(cached_value.Value)
+			switch (*parsed_value).(type) {
+			case TodoItem:
+				cached_item := (*parsed_value).(TodoItem)
+				assert(t,
+					cached_item.DueDate == dueDate1,
+					"cached item due date doesn't reflect update")
+			default:
+				t.Fatal("error encoding memcached item")
+			}
+		default:
+			t.Fatal("readTodoItem returned a weird result: ", *item)
+		}
+	default:
+		t.Fatal("writeTodoItem returned a weird result")
+	}
+
+	defer done()
+}

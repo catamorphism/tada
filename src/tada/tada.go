@@ -92,8 +92,10 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 	} else {
 		log("write succeeded " + key.String())
 		k := TodoID(*key)
+		// FIXME: should check the results of invalidate calls
 		invalidateCache(ctx, *key)
-		// FIXME should also invalidate all entries for the user or else we'll return a stale todo list
+		// not sure what the point of using memcache really is if I'm going to do this *shrug* -- fix would be to cache items individually and not use GetAll
+		invalidateCacheByOwner(ctx, u.Email)
 		*result = k
 		indexResult := indexCommentForSearch(ctx, k)
 		switch (*indexResult).(type) {
@@ -391,7 +393,7 @@ func jsonToMatches(blob []byte) *MaybeError {
 	if err != nil {
 		*result = E(err.Error())
 	} else {
-		*result = items
+		*result = *items
 	}
 	return result
 }
@@ -621,6 +623,18 @@ Instead, might want to use listTodoItems so it uses the same code as readTodoIte
 func invalidateCache(ctx context.Context, key datastore.Key) *MaybeError {
 	// delete key from memcache
 	err := memcache.Delete(ctx, key.String())
+	var result = new(MaybeError)
+	if err != nil {
+		*result = E(err.Error())
+	} else {
+		*result = Ok{}
+	}
+	return result
+}
+
+func invalidateCacheByOwner(ctx context.Context, email string) *MaybeError {
+	// delete key from memcache
+	err := memcache.Delete(ctx, email)
 	var result = new(MaybeError)
 	if err != nil {
 		*result = E(err.Error())

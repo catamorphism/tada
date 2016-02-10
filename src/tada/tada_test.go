@@ -124,6 +124,40 @@ func TestListTodo(t *testing.T) {
 	defer done()
 }
 
+// write 1 todo item
+// list todo items: should be 1 item
+// write another todo item
+// list todo items again: should be 2 items
+func TestListWriteList(t *testing.T) {
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
+
+	writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser, false)
+	listResults := listTodoItems(ctx, &testUser)
+	switch (*listResults).(type) {
+	case Matches:
+		items := ([]Match)((*listResults).(Matches))
+		assert(t, len(items) == 1, fmt.Sprintf("wrong number of todo items: expected 1, saw %d", len(items)))
+		writeTodoItem(ctx, "buy a new phone", dueDate, false, &testUser, false)
+		listResults1 := listTodoItems(ctx, &testUser)
+		switch (*listResults1).(type) {
+		case Matches:
+			items1 := ([]Match)((*listResults1).(Matches))
+			assert(t, len(items1) == 2, fmt.Sprintf("wrong number of todo items: expected 2, saw %d", len(items1)))
+		default:
+			t.Fatal(fmt.Sprintf("weird result from second listTodoItems: %s", *listResults1))
+		}
+	default:
+		t.Fatal("weird result from listTodoItems")
+	}
+
+	defer done()
+
+}
+
 func TestUpdate(t *testing.T) {
 	ctx, done, err := aetest.NewContext()
 	if err != nil {

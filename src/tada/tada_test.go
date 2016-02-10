@@ -158,6 +158,52 @@ func TestListWriteList(t *testing.T) {
 
 }
 
+// write 1 todo item
+// list todo items: should be 1 item, not complete
+// update the first item
+// list todo items: should be 1 item, complete
+func TestListUpdateList(t *testing.T) {
+
+	ctx, done, err := aetest.NewContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dueDate := time.Date(2016, 2, 29, 13, 0, 0, 0, time.UTC)
+
+	id := writeTodoItem(ctx, "phone up my friend", dueDate, false, &testUser, false)
+	switch (*id).(type) {
+	case TodoID:
+		id1 := (*id).(TodoID)
+		k := datastore.Key(id1)
+		listResults := listTodoItems(ctx, &testUser)
+		switch (*listResults).(type) {
+		case Matches:
+			items := ([]Match)((*listResults).(Matches))
+			assert(t, len(items) == 1, fmt.Sprintf("wrong number of todo items: expected 1, saw %d", len(items)))
+			result := updateTodoItem(ctx, testUser.Email, "phone up my friend", dueDate, true, k.IntID())
+			assert(t, *result == Ok{}, fmt.Sprintf("error updating item: %s", *result))
+			_, err := memcache.Get(ctx, testUser.Email)
+			assert(t, err == memcache.ErrCacheMiss, "user's todo list was still cached after updating an item")
+			listResults1 := listTodoItems(ctx, &testUser)
+			switch (*listResults1).(type) {
+			case Matches:
+				items1 := ([]Match)((*listResults1).(Matches))
+				assert(t, len(items1) == 1, fmt.Sprintf("wrong number of todo items: expected 1, saw %d", len(items1)))
+				assert(t, items1[0].Value.State == "completed", fmt.Sprintf("expected completed task, saw: %s", items1[0].Value.State))
+			default:
+				t.Fatal(fmt.Sprintf("weird result from second listTodoItems: %s", *listResults1))
+			}
+		default:
+			t.Fatal("weird result from listTodoItems")
+		}
+	default:
+		t.Fatal("weird result from writeTodoItem")
+	}
+
+	defer done()
+
+}
+
 func TestUpdate(t *testing.T) {
 	ctx, done, err := aetest.NewContext()
 	if err != nil {

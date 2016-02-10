@@ -85,6 +85,7 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 		OwnerEmail:  u.Email,
 	}
 	key, err := datastore.Put(ctx, datastore.NewIncompleteKey(ctx, "TodoItem", nil), &item)
+	log(fmt.Sprintf("WRITE: key = %s", key))
 	var result = new(MaybeError)
 	if err != nil {
 		log("write error: " + err.Error())
@@ -94,8 +95,6 @@ func writeTodoItem(ctx context.Context, description string, dueDate time.Time, s
 		k := TodoID(*key)
 		// FIXME: should check the results of invalidate calls
 		invalidateCache(ctx, *key)
-		// not sure what the point of using memcache really is if I'm going to do this *shrug* -- fix would be to cache items individually and not use GetAll
-		invalidateCacheByOwner(ctx, u.Email)
 		*result = k
 		indexResult := indexCommentForSearch(ctx, k)
 		switch (*indexResult).(type) {
@@ -139,18 +138,23 @@ func updateTodoItem(ctx context.Context, email string, description string, dueDa
 		id,
 		nil)
 	key, err := datastore.Put(ctx, k, &item)
+	log(fmt.Sprintf("UPDATE: key = %s", key))
 	var result = new(MaybeError)
 	if err != nil {
 		log("update error: " + err.Error())
 		*result = E(err.Error())
 	} else {
 		log("update succeeded " + key.String())
+		// n.b. This updateCache call is necessary for consistency
+		// because otherwise, a successive call to listTodoItems might not be
+		// consistent with the results of this call to update
 		updateCache(ctx, *key, item)
 		indexResult := indexCommentForSearch(ctx, TodoID(*key))
 		switch (*indexResult).(type) {
 		case E:
 			result = indexResult
 		case Ok:
+			*result = Ok{}
 			break
 		case TodoID, Matches, TodoItem:
 			*result = E("weird answer from indexCommentForSearch")
@@ -220,48 +224,28 @@ func listTodoItems(ctx context.Context, u *user.User) *MaybeError {
 	// filter by user
 	log(fmt.Sprintf("Making query, email = %s", u.Email))
 
-	maybeCached := lookupCacheByOwner(ctx, u.Email)
-	if (*maybeCached != CacheMiss{}) {
-		// item was cached, return it
-		return maybeCached
-	}
-
 	q := datastore.NewQuery("TodoItem").Filter("OwnerEmail=", u.Email).Order("DueDate")
 	keys, err := q.GetAll(ctx, &resultList)
 	if err != nil {
 		log(fmt.Sprintf("listTodoItems got %d keys err = %s", len(keys), err.Error()))
 		*result = E(err.Error())
 	} else {
-		log(fmt.Sprintf("got %d items %s\n", len(keys), u.Email))
+		log(fmt.Sprintf("got %d items %s [%s] / [%s]\n", len(keys), u.Email, keys, resultList))
 		// *assuming* these are going to be in the same order...
 		var matches = make([]Match, 0)
-		for i, k := range keys {
-			matches = append(matches, Match{k, resultList[i]})
+		// this is a bit silly since we already did the database query, but...
+		// if we call readTodoItem we get the more-recent item in the cache
+		for _, k := range keys {
+			anItem := readTodoItem(ctx, TodoID(*k))
+			switch (*anItem).(type) {
+			case TodoItem:
+				matches = append(matches, Match{k, (*anItem).(TodoItem)})
+			default:
+				*result = (E("readTodoItem returned weird result in listTodoItems"))
+				return result
+			}
 		}
 		*result = Matches(matches)
-		updateCacheByOwner(ctx, u.Email, matches)
-	}
-	return result
-}
-
-// change a todo item's state from "completed" to "incomplete" or vice versa
-func updateTaskState(ctx context.Context, itemID TodoID, completed bool, remind bool) *MaybeError {
-	item := readTodoItem(ctx, itemID)
-	var result = new(MaybeError)
-	switch (*item).(type) {
-	case TodoItem:
-		{
-			todoItem := (*item).(TodoItem)
-			result = writeTodoItem(ctx, todoItem.Description, todoItem.DueDate, completed, user.Current(ctx), remind)
-		}
-	case E:
-		{
-			result = item
-		}
-	case TodoID, Matches, Ok:
-		{
-			*result = (MaybeError)(E("readTodoItem returned a weird result"))
-		}
 	}
 	return result
 }
@@ -618,23 +602,13 @@ func respondWith(w http.ResponseWriter, result MaybeError) {
 That said, I'm not sure aggregating all the items for one owner is a good idea.
 If any item changes you have to invalidate all of them.
 Instead, might want to use listTodoItems so it uses the same code as readTodoItem
+
+CHANGED: now we only cache individual todo items. this simplifies the caching scheme
 */
 
 func invalidateCache(ctx context.Context, key datastore.Key) *MaybeError {
 	// delete key from memcache
 	err := memcache.Delete(ctx, key.String())
-	var result = new(MaybeError)
-	if err != nil {
-		*result = E(err.Error())
-	} else {
-		*result = Ok{}
-	}
-	return result
-}
-
-func invalidateCacheByOwner(ctx context.Context, email string) *MaybeError {
-	// delete key from memcache
-	err := memcache.Delete(ctx, email)
 	var result = new(MaybeError)
 	if err != nil {
 		*result = E(err.Error())
@@ -670,28 +644,8 @@ func updateCache(ctx context.Context, key datastore.Key, item TodoItem) {
 	}
 }
 
-func lookupCacheByOwner(ctx context.Context, email string) *MaybeError {
-	maybeItem, err := memcache.Get(ctx, email) // ??
-	var result = new(MaybeError)
-	if err != nil {
-		*result = CacheMiss{}
-	} else {
-		result = jsonToMatches(maybeItem.Value)
-	}
-	return result
-}
-
-func updateCacheByOwner(ctx context.Context, email string, items Matches) {
-	var result = matchesToJson(items)
-	switch (*result).(type) {
-	case Blob:
-		blob := ([]byte)((*result).(Blob))
-		item := memcache.Item{
-			Key:   email,
-			Value: blob,
-		}
-		memcache.Set(ctx, &item) // ignore errors; worst that can happen is a cache miss
-	default:
-		break
-	}
-}
+/*
+Ran into an interesting eventual consistency problem b/c at first, I was caching todo list items and entire todo lists separately, and invalidating the cache for both after an individual item was changed.
+This wasn't good enough b/c without updating memcache, the next listTodoItems call wouldn't see the result of the update.
+Changed it to only cache individual items and update the memcache manually after every update
+*/

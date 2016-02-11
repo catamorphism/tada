@@ -534,18 +534,9 @@ func respondWith(w http.ResponseWriter, result MaybeError) {
 }
 
 /*
-	type CacheMiss
-	func invalidateCache(key)
-	func lookupCache(key)
-	func updateCache(key, item)
-	func lookupCacheByOwner(email)
-	func updateCacheByOwner(email, itemlist)
-
-That said, I'm not sure aggregating all the items for one owner is a good idea.
-If any item changes you have to invalidate all of them.
-Instead, might want to use listTodoItems so it uses the same code as readTodoItem
-
-CHANGED: now we only cache individual todo items. this simplifies the caching scheme
+originally I was caching the entire todo list for a user as a block so I wouldn't
+have to fetch the todo entries individually, but this was awkward since when one
+item changes, the cached list would have to be modified
 */
 
 func invalidateCache(ctx context.Context, key datastore.Key) *MaybeError {
